@@ -1,0 +1,12 @@
+{
+  "name": "dingtalk",
+  "description": "DingTalk channel for Claude Code — uses DingTalk Stream Mode to bridge bot messages into your session. Manage access via /dingtalk:access.",
+  "version": "0.1.0",
+  "keywords": [
+    "dingtalk",
+    "钉钉",
+    "messaging",
+    "channel",
+    "mcp"
+  ]
+}
