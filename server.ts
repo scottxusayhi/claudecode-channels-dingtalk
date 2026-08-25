@@ -536,7 +536,31 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
-await mcp.connect(new StdioServerTransport())
+// Intercept stdin to log what Claude Code sends
+process.stdin.on('data', (chunk: Buffer) => {
+  try {
+    appendFileSync(
+      join(STATE_DIR, 'debug.log'),
+      `${new Date().toISOString()} STDIO_IN_RAW: ${chunk.toString().trim()}\n`,
+    )
+  } catch {}
+})
+
+const transport = new StdioServerTransport()
+const origSend = transport.send.bind(transport)
+transport.send = async (message: unknown) => {
+  appendFileSync(
+    join(STATE_DIR, 'debug.log'),
+    `${new Date().toISOString()} STDIO_OUT: ${JSON.stringify(message)}\n`,
+  )
+  return origSend(message)
+}
+await mcp.connect(transport)
+
+appendFileSync(
+  join(STATE_DIR, 'debug.log'),
+  `${new Date().toISOString()} MCP connected. Client capabilities: ${JSON.stringify((mcp as any)._clientCapabilities)}\n`,
+)
 
 // --- inbound via DingTalk Stream Mode ----------------------------------------
 
@@ -749,7 +773,7 @@ async function forwardInbound(msg: BotMessage): Promise<void> {
     })
   }
 
-  void mcp.notification({
+  const notifPayload = {
     method: 'notifications/claude/channel',
     params: {
       content,
@@ -766,7 +790,23 @@ async function forwardInbound(msg: BotMessage): Promise<void> {
           : {}),
       },
     },
-  })
+  }
+  try {
+    appendFileSync(
+      join(STATE_DIR, 'debug.log'),
+      `${new Date().toISOString()} NOTIFY sending: ${JSON.stringify(notifPayload)}\n`,
+    )
+    await mcp.notification(notifPayload)
+    appendFileSync(
+      join(STATE_DIR, 'debug.log'),
+      `${new Date().toISOString()} NOTIFY sent OK\n`,
+    )
+  } catch (err) {
+    appendFileSync(
+      join(STATE_DIR, 'debug.log'),
+      `${new Date().toISOString()} NOTIFY FAILED: ${err instanceof Error ? err.stack : err}\n`,
+    )
+  }
 }
 
 async function openStreamSession(): Promise<{ endpoint: string; ticket: string }> {
@@ -876,7 +916,7 @@ function handleStreamFrame(ws: WebSocket, raw: string): void {
       : `content=${JSON.stringify(data.content)}`
     appendFileSync(
       join(STATE_DIR, 'debug.log'),
-      `${new Date().toISOString()} INBOUND msgtype=${data.msgtype} msgId=${data.msgId} ${logDetail}\n`,
+      `${new Date().toISOString()} INBOUND msgtype=${data.msgtype} msgId=${data.msgId} staffId=${data.senderStaffId} nick=${data.senderNick} conversationId=${data.conversationId} conversationType=${data.conversationType} ${logDetail}\n`,
     )
   } catch {}
   void forwardInbound(data).catch(err => {
