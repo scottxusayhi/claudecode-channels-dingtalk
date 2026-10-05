@@ -14,7 +14,9 @@
  *   bun test/tenant-smoke.ts
  *
  * The tenants root must sit inside a trusted folder; by default it is created
- * under ~/projects. Override with SMOKE_TRUSTED_PARENT.
+ * under ~/projects. Override with SMOKE_TRUSTED_PARENT. SMOKE_CHANNEL picks
+ * the channel plugin (default plugin:dingtalk@remote-cc); it must be on the
+ * machine's managed channel allowlist.
  */
 
 import { connect, type Socket } from 'net'
@@ -58,7 +60,8 @@ const state = mkdtempSync(join(tmpdir(), 'dingtalk-smoke-'))
 const tenantsRoot = mkdtempSync(join(process.env.SMOKE_TRUSTED_PARENT ?? join(homedir(), 'projects'), '.dt-smoke-'))
 writeFileSync(join(state, 'config.json'), JSON.stringify({
   clientId: 'dingtest', clientSecret: 'x', robotCode: 'dingtest', unroutedReply: 'NO-ROUTE',
-  tenants: { enabled: true, root: tenantsRoot, idleMinutes: 0, launchTimeoutSec: 60, escalateTo: ['999'] },
+  tenants: { enabled: true, root: tenantsRoot, idleMinutes: 0, launchTimeoutSec: 60, escalateTo: ['999'],
+    ...(process.env.SMOKE_CHANNEL ? { channel: process.env.SMOKE_CHANNEL } : {}) },
 }))
 writeFileSync(join(state, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['111', '222', '333', '444', '555', '666', '777', '888'], groups: {} }))
 
