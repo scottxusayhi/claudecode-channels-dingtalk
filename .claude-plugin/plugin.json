@@ -1,7 +1,7 @@
 {
   "name": "dingtalk",
-  "description": "DingTalk channel for Claude Code — uses DingTalk Stream Mode to bridge bot messages into your session. Manage access via /dingtalk:access.",
-  "version": "0.1.0",
+  "description": "DingTalk channel for Claude Code — uses DingTalk Stream Mode to bridge bot messages into your sessions, routing each sender or group to its own session. Manage access via /dingtalk:access and routing via /dingtalk:bind.",
+  "version": "0.2.0",
   "keywords": [
     "dingtalk",
     "钉钉",
