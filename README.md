@@ -235,6 +235,18 @@ claude attach <session>           # 在你的终端里实时旁观或接管某�
 claude logs <session>             # 查看最近输出
 ```
 
+### 单会话机器人常驻（launchd）
+
+不走租户模式、一个机器人对一个会话的老用法，也可以不开终端，改由 launchd 托管：
+
+```bash
+deploy/launchd-session.sh install <name> <工作目录> <session-id> --channels plugin:dingtalk@<marketplace> [其他 claude 参数]
+deploy/launchd-session.sh status <name>
+deploy/launchd-session.sh uninstall <name>    # 停掉托管和会话本身
+```
+
+它每 30 秒检查一次这个对话是否在后台运行，不在就用同一个 session id 接着跑（`claude respawn`，没有记录时 `claude --bg --resume`），对话历史和 id 都不变；同一个对话还开在某个终端里时它只等待，不会另起一份。后台会话没法确认 `--dangerously-load-development-channels` 的提示，所以要用 `--channels`，并把插件加进 managed settings 的 `allowedChannelPlugins`。凭据照旧放在工作目录的 `.claude/settings.local.json`。日志在 `~/Library/Logs/claude-session-<name>.log`，`claude attach <id>` 可以随时进去看。
+
 ## Features
 
 - **Text messages** — 收发文字消息
@@ -269,6 +281,7 @@ claude logs <session>             # 查看最近输出
 ├── skills/bind/SKILL.md          # /dingtalk:bind skill
 ├── skills/tenants/SKILL.md       # /dingtalk:tenants skill
 ├── deploy/launchd-broker.sh      # run the broker under launchd (macOS)
+├── deploy/launchd-session.sh     # keep one single-tenant session running under launchd
 ├── docs/                         # architecture page and its generator
 └── test/
     ├── run.ts                    # broker routing tests
