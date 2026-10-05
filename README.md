@@ -235,6 +235,19 @@ claude attach <session>           # 在你的终端里实时旁观或接管某�
 claude logs <session>             # 查看最近输出
 ```
 
+### 提问记录
+
+`monitor.ts` 记录每个人问了自己的助手什么。它和 broker 互不相干：只读 Claude Code 自己保存在 `~/.claude/projects/` 里的租户会话记录，把其中的钉钉消息逐条存下来（按消息 id 去重，会话 resume 出副本也不会重复），所以装上、重启、卸载都不用动 broker 和任何会话；会话记录被清理或 `reset` 之后，这里的记录还在。
+
+```bash
+deploy/launchd-monitor.sh install                  # 常驻，开机自启，第一次会把已有的记录补齐
+tail -f ~/.claude/channels/dingtalk/questions.log  # 实时看，一条消息一行
+bun monitor.ts report                              # 按人汇总
+bun monitor.ts report --staff 张三 --days 7         # 某个人最近 7 天（姓名或 staffId）
+```
+
+记录在 state 目录里（`questions.jsonl`、`questions.log`，权限 `600`），租户的沙箱读不到。里面是租户发的原话，按隐私数据对待，不要提交或外传。
+
 ### 单会话机器人常驻（launchd）
 
 不走租户模式、一个机器人对一个会话的老用法，也可以不开终端，改由 launchd 托管：
@@ -277,16 +290,19 @@ deploy/launchd-session.sh uninstall <name>    # 停掉托管和会话本身
 ├── broker.ts                     # daemon: DingTalk connection + routing table
 ├── tenants.ts                    # tenant mode: per-user session lifecycle + confinement
 ├── server.ts                     # per-session MCP shim
+├── monitor.ts                    # question log: what each tenant asked (reads transcripts)
 ├── skills/access/SKILL.md        # /dingtalk:access skill
 ├── skills/bind/SKILL.md          # /dingtalk:bind skill
 ├── skills/tenants/SKILL.md       # /dingtalk:tenants skill
 ├── deploy/launchd-broker.sh      # run the broker under launchd (macOS)
 ├── deploy/launchd-session.sh     # keep one single-tenant session running under launchd
+├── deploy/launchd-monitor.sh     # run the question log under launchd
 ├── docs/                         # architecture page and its generator
 └── test/
     ├── run.ts                    # broker routing tests
     ├── shim.ts                   # MCP shim end-to-end tests
     ├── tenants.ts                # tenant mode tests (against a fake claude CLI)
+    ├── monitor.ts                # question log tests
     ├── fake-claude.ts            # stand-in for `claude --bg/stop/rm`
     ├── tenant-smoke.ts           # tenant mode against the real CLI (uses the model)
     ├── fake-session.ts           # a fake session, for poking by hand
