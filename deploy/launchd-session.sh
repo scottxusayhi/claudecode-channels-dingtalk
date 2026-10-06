@@ -59,6 +59,13 @@ where_running() {
     console.log(r ? `${r.kind} ${r.pid}` : "none")'
 }
 
+# bootout returns before the job is gone; bootstrapping over it then fails
+# with "5: Input/output error". Wait until launchd has really let go.
+unload() {
+  launchctl bootout "$DOMAIN/$1" 2>/dev/null || true
+  for _ in $(seq 1 50); do launchctl print "$DOMAIN/$1" >/dev/null 2>&1 || return 0; sleep 0.2; done
+}
+
 case "${1:-}" in
 install)
   NAME="${2:-}"; DIR="${3:-}"; SID="${4:-}"
@@ -96,7 +103,7 @@ install)
 </plist>
 EOF
   plutil -lint "$P" >/dev/null
-  launchctl bootout "$DOMAIN/$(label "$NAME")" 2>/dev/null || true
+  unload "$(label "$NAME")"
   launchctl bootstrap "$DOMAIN" "$P"
   echo "installed $P — log: $(logfile "$NAME")"
   ;;
@@ -146,7 +153,7 @@ uninstall)
   NAME="${2:-}"; check_name "$NAME"
   P="$(plist "$NAME")"
   SID="$(sid_of "$NAME")"
-  launchctl bootout "$DOMAIN/$(label "$NAME")" 2>/dev/null || true
+  unload "$(label "$NAME")"
   rm -f "$P"
   if [ -n "$SID" ]; then
     "$(find_bin claude)" stop "${SID:0:8}" </dev/null 2>&1 | sed 's/^/  /' || true

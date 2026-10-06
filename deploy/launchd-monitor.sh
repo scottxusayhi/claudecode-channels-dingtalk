@@ -26,6 +26,13 @@ find_bun() {
 
 xml() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<<"$1"; }
 
+# bootout returns before the job is gone; bootstrapping over it then fails
+# with "5: Input/output error". Wait until launchd has really let go.
+unload() {
+  launchctl bootout "$DOMAIN/$1" 2>/dev/null || true
+  for _ in $(seq 1 50); do launchctl print "$DOMAIN/$1" >/dev/null 2>&1 || return 0; sleep 0.2; done
+}
+
 case "${1:-}" in
 install)
   BUN="$(find_bun)"
@@ -56,12 +63,12 @@ install)
 </plist>
 EOF
   plutil -lint "$PLIST" >/dev/null
-  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  unload "$LABEL"
   launchctl bootstrap "$DOMAIN" "$PLIST"
   echo "installed $PLIST (bun: $BUN, repo: $REPO) — questions go to $STATE/questions.log"
   ;;
 uninstall)
-  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  unload "$LABEL"
   rm -f "$PLIST"
   echo "removed $LABEL (recorded questions are kept)"
   ;;
