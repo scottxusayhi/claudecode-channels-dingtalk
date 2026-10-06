@@ -2,14 +2,20 @@
 /**
  * Question log for tenant mode: what each person asked their assistant.
  *
- * Runs beside the broker and never talks to it. Claude Code already keeps
- * every tenant session's transcript under ~/.claude/projects/; this reads the
- * DingTalk messages out of them and records each one once, so the record
- * outlives transcript cleanup, `reset`, and resumed copies of a session.
+ * Runs beside the broker and never needs it restarted. Claude Code already
+ * keeps every tenant session's transcript under ~/.claude/projects/; this
+ * reads the DingTalk messages out of them and records each one once, so the
+ * record outlives transcript cleanup, `reset`, and resumed copies of a session.
+ *
+ * While watching, a message from anyone but the owner is also forwarded to the
+ * owner as a DingTalk DM, sent through the broker's socket like any other
+ * reply. Who counts as the owner: `monitor.notifyTo` in config.json (a list of
+ * staffIds; [] turns this off), else `tenants.escalateTo`.
  *
  *   bun monitor.ts                       keep watching (what launchd runs)
- *   bun monitor.ts --once                catch up once and exit
+ *   bun monitor.ts --once                catch up once and exit (no DMs)
  *   bun monitor.ts report [--staff <staffId|name>] [--days N]
+ *   bun monitor.ts notify-test           send the owner a sample notification
  *
  * Writes to the state dir, which tenant sandboxes can't read:
  *   questions.jsonl   one JSON object per message
@@ -17,15 +23,18 @@
  */
 
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync, openSync, readSync, closeSync } from 'fs'
+import { connect } from 'net'
 import { join } from 'path'
 import { homedir } from 'os'
-import { CONFIG_FILE, STATE_DIR, parseTenantConfig } from './shared.ts'
+import { CONFIG_FILE, SOCKET_PATH, STATE_DIR, lineDecoder, parseTenantConfig, sendLine } from './shared.ts'
 
 const PROJECTS_DIR = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects')
 const QUESTIONS_FILE = join(STATE_DIR, 'questions.jsonl')
 const QUESTIONS_LOG = join(STATE_DIR, 'questions.log')
 const OFFSETS_FILE = join(STATE_DIR, 'monitor-offsets.json')
 const SCAN_MS = Number(process.env.DINGTALK_MONITOR_SCAN_MS ?? 5000)
+/** Only messages this recent are forwarded, so catching up on old transcripts never floods the owner. */
+const NOTIFY_WITHIN_MS = 10 * 60_000
 
 export type Question = {
   ts: string
@@ -108,12 +117,12 @@ function oneLine(q: Question): string {
 }
 
 /** Read what was appended to each transcript since last time; record messages not seen before. */
-export function scan(): number {
+export function scan(): Question[] {
   const root = tenantsRoot()
   const offsets: Record<string, number> = existsSync(OFFSETS_FILE)
     ? JSON.parse(readFileSync(OFFSETS_FILE, 'utf8')) : {}
   const seen = loadSeen()
-  let added = 0
+  const added: Question[] = []
   for (const dir of transcriptDirs(root)) {
     for (const name of readdirSync(dir).filter(n => n.endsWith('.jsonl'))) {
       const file = join(dir, name)
@@ -136,7 +145,7 @@ export function scan(): number {
           seen.add(q.messageId)
           appendFileSync(QUESTIONS_FILE, JSON.stringify(q) + '\n', { mode: 0o600 })
           appendFileSync(QUESTIONS_LOG, oneLine(q) + '\n', { mode: 0o600 })
-          added++
+          added.push(q)
         }
       }
       offsets[file] = from + end + 1
@@ -144,6 +153,62 @@ export function scan(): number {
   }
   writeFileSync(OFFSETS_FILE, JSON.stringify(offsets), { mode: 0o600 })
   return added
+}
+
+/** Who hears about new messages: monitor.notifyTo, else tenants.escalateTo. */
+function notifyTargets(): string[] {
+  const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) as { monitor?: { notifyTo?: unknown }; tenants?: unknown }
+  const explicit = raw.monitor?.notifyTo
+  if (Array.isArray(explicit)) return explicit.map(String)
+  return parseTenantConfig(raw.tenants)?.escalateTo ?? []
+}
+
+/** Send a DM through the broker, as an owner-side client would. */
+function sendViaBroker(staffId: string, text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const sock = connect(SOCKET_PATH)
+    const done = (err?: Error) => { clearTimeout(timer); sock.destroy(); err ? reject(err) : resolve() }
+    const timer = setTimeout(() => done(new Error('broker did not answer')), 20_000)
+    sock.on('error', err => done(err))
+    sock.on('connect', () => sendLine(sock, { t: 'hello', pid: process.pid, cwd: '/monitor', label: 'monitor', routes: [] }))
+    sock.on('data', lineDecoder(m => {
+      const f = m as { t?: string; ok?: boolean; error?: string; reason?: string }
+      // A chat id of our own: the owner's real DM id would cut short the
+      // "thinking" reaction on a message they're waiting on.
+      if (f.t === 'welcome') sendLine(sock, { t: 'reply', id: 'n', args: { chat_id: `monitor:${staffId}`, is_group: 'false', user: staffId, text } })
+      if (f.t === 'rejected') done(new Error(`broker rejected the monitor: ${f.reason ?? ''}`))
+      if (f.t === 'result') done(f.ok ? undefined : new Error(f.error ?? 'send failed'))
+    }))
+  })
+}
+
+function notification(qs: Question[]): string {
+  return qs.map(q => {
+    const extra = [q.image && '[图片]', q.file && '[文件]'].filter(Boolean).join(' ')
+    const text = q.text.length > 300 ? q.text.slice(0, 300) + '…' : q.text
+    return `📨 ${q.nick} 给助手发了消息（${localTime(q.ts).slice(11)}）：\n${text}${extra ? ' ' + extra : ''}`
+  }).join('\n\n')
+}
+
+let unsent: Question[] = []
+
+/** Forward fresh messages from anyone but the owners themselves; what fails is retried on the next scan. */
+async function notify(fresh: Question[]): Promise<void> {
+  const targets = notifyTargets()
+  const now = Date.now()
+  unsent = [...unsent, ...fresh]
+    .filter(q => !targets.includes(q.staffId) && now - Date.parse(q.ts) < NOTIFY_WITHIN_MS)
+  if (!targets.length || !unsent.length) return
+  const batch = unsent
+  unsent = []
+  for (const to of targets) {
+    try {
+      await sendViaBroker(to, notification(batch))
+    } catch (err) {
+      process.stderr.write(`dingtalk monitor: could not notify ${to}: ${err instanceof Error ? err.message : err}\n`)
+      unsent = batch
+    }
+  }
 }
 
 function report(args: string[]): void {
@@ -174,19 +239,32 @@ if (import.meta.main) {
   const args = process.argv.slice(2)
   if (args[0] === 'report') {
     report(args.slice(1))
+  } else if (args[0] === 'notify-test') {
+    const targets = notifyTargets()
+    if (!targets.length) { console.log('nobody to notify: set monitor.notifyTo or tenants.escalateTo'); process.exit(1) }
+    for (const to of targets) {
+      await sendViaBroker(to, '🔔 提问提醒已开启：有人给助手发消息时，我会在这里告诉你。（这是一条测试消息）')
+      console.log(`sent a test notification to ${to}`)
+    }
   } else if (args.includes('--once')) {
-    console.log(`recorded ${scan()} new message(s)`)
+    console.log(`recorded ${scan().length} new message(s)`)
   } else {
-    process.stderr.write(`dingtalk monitor: watching tenant transcripts every ${SCAN_MS / 1000}s → ${QUESTIONS_LOG}\n`)
-    const tick = () => {
+    process.stderr.write(`dingtalk monitor: watching tenant transcripts every ${SCAN_MS / 1000}s → ${QUESTIONS_LOG}; notifying ${notifyTargets().join(', ') || 'nobody'}\n`)
+    let busy = false
+    const tick = async () => {
+      if (busy) return
+      busy = true
       try {
-        const n = scan()
-        if (n) process.stderr.write(`dingtalk monitor: recorded ${n} message(s)\n`)
+        const fresh = scan()
+        if (fresh.length) process.stderr.write(`dingtalk monitor: recorded ${fresh.length} message(s)\n`)
+        await notify(fresh)
       } catch (err) {
         process.stderr.write(`dingtalk monitor: ${err instanceof Error ? err.message : err}\n`)
+      } finally {
+        busy = false
       }
     }
-    tick()
+    void tick()
     setInterval(tick, SCAN_MS)
   }
 }

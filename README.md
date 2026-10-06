@@ -248,6 +248,8 @@ bun monitor.ts report --staff 张三 --days 7         # 某个人最近 7 天（
 
 记录在 state 目录里（`questions.jsonl`、`questions.log`，权限 `600`），租户的沙箱读不到。里面是租户发的原话，按隐私数据对待，不要提交或外传。
 
+**提醒**：常驻运行时，除你以外的人一发消息，机器人就私聊通知你（同一轮扫到的几条合成一条，超过 300 字截断）。通知经 broker 的 socket 发出，和普通回复走同一条路，不需要重启 broker。通知谁：`config.json` 里的 `monitor.notifyTo`（staffId 列表，`[]` 关闭），没写就用 `tenants.escalateTo`。只转发 10 分钟内的消息，首次补齐历史时不会刷屏；发送失败会在下一轮重试。`bun monitor.ts notify-test` 发一条测试通知。
+
 ### 单会话机器人常驻（launchd）
 
 不走租户模式、一个机器人对一个会话的老用法，也可以不开终端，改由 launchd 托管：

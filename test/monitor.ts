@@ -11,9 +11,11 @@
  */
 
 import { spawnSync, spawn } from 'child_process'
+import { createServer, type Server } from 'net'
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, statSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
+import { lineDecoder, sendLine } from '../shared.ts'
 
 const ROOT = join(import.meta.dir, '..')
 const tmp = mkdtempSync(join(tmpdir(), 'dingtalk-monitor-'))
@@ -105,6 +107,75 @@ try {
   check('report filters by name', rep.includes('甲 (111) — 3 条') && !rep.includes('乙'), rep)
   const all = run('report').stdout
   check('report groups by person', all.includes('乙 (222) — 2 条') && all.includes('丙 (333) — 1 条'), all)
+
+  console.log('\nnotifying the owner')
+  writeFileSync(join(state, 'config.json'), JSON.stringify({
+    clientId: 'x', clientSecret: 'x', tenants: { enabled: true, root: tenantsRoot, escalateTo: ['999'] },
+  }))
+  // A stand-in broker: welcomes any client and records the replies it is asked to send.
+  const sent: Array<{ user: string; chat_id: string; text: string }> = []
+  let broker: Server | null = null
+  const startBroker = () => new Promise<void>(resolve => {
+    broker = createServer(sock => {
+      sock.on('data', lineDecoder(m => {
+        const f = m as { t: string; id?: string; args?: { user: string; chat_id: string; text: string } }
+        if (f.t === 'hello') sendLine(sock, { t: 'welcome', brokerPid: 1, bound: [] })
+        if (f.t === 'reply') { sent.push(f.args!); sendLine(sock, { t: 'result', id: f.id!, ok: true }) }
+      }))
+    }).listen(join(state, 'broker.sock'), () => resolve())
+  })
+  const stopBroker = () => new Promise<void>(resolve => {
+    if (!broker) return resolve()
+    broker.close(() => resolve())
+    broker = null
+    setTimeout(resolve, 500) // close() waits for connections a client may have left half-open
+  })
+  const fresh = (staffId: string, nick: string, text: string) => JSON.stringify({
+    type: 'user', sessionId: `sess-${staffId}`, timestamp: new Date().toISOString(),
+    message: { role: 'user', content: `<channel source="plugin:dingtalk:dingtalk" chat_id="cid-${staffId}=" user="${staffId}" user_name="${nick}" is_group="false" message_id="f${++n}">\n${text}\n</channel>` },
+  }) + '\n'
+  await startBroker()
+  const watcher = spawn(process.execPath, [join(ROOT, 'monitor.ts')], { env, stdio: ['ignore', 'ignore', 'pipe'] })
+  let watcherErr = ''
+  watcher.stderr!.on('data', d => { watcherErr += d })
+  await new Promise(r => setTimeout(r, 600))
+  check('catching up on old messages sends nothing', sent.length === 0, JSON.stringify(sent))
+  mkdirSync(dirFor('444'), { recursive: true })
+  mkdirSync(dirFor('999'), { recursive: true })
+  appendFileSync(join(dirFor('444'), 'e.jsonl'), fresh('444', '丁', '帮我看下这个报错') + fresh('444', '丁', '还有一个问题'))
+  appendFileSync(join(dirFor('999'), 'f.jsonl'), fresh('999', '主人', '我自己的消息'))
+  await new Promise(r => setTimeout(r, 1000))
+  check('a new message is forwarded to the owner', sent.length === 1 && sent[0]!.user === '999', JSON.stringify(sent))
+  check('…both messages in one DM, with who sent them', !!sent[0] && sent[0].text.includes('丁 给助手发了消息') && sent[0].text.includes('帮我看下这个报错') && sent[0].text.includes('还有一个问题'), sent[0]?.text)
+  check("…not the owner's own message", !sent.some(s => s.text.includes('我自己的消息')))
+  check("…and not on the owner's real DM chat", !!sent[0] && !sent[0].chat_id.startsWith('cid'), sent[0]?.chat_id)
+
+  await stopBroker()
+  appendFileSync(join(dirFor('444'), 'e.jsonl'), fresh('444', '丁', '趁 broker 不在时发的'))
+  await new Promise(r => setTimeout(r, 800))
+  await startBroker()
+  await new Promise(r => setTimeout(r, 1000))
+  check('a notification that could not be sent is retried', sent.length === 2 && sent[1]!.text.includes('趁 broker 不在时发的'), JSON.stringify(sent.map(s => s.text)))
+  check('the failure is logged', watcherErr.includes('could not notify'), watcherErr)
+
+  writeFileSync(join(state, 'config.json'), JSON.stringify({
+    clientId: 'x', clientSecret: 'x', monitor: { notifyTo: [] }, tenants: { enabled: true, root: tenantsRoot, escalateTo: ['999'] },
+  }))
+  appendFileSync(join(dirFor('444'), 'e.jsonl'), fresh('444', '丁', '关掉提醒之后'))
+  await new Promise(r => setTimeout(r, 1000))
+  watcher.kill()
+  check('monitor.notifyTo: [] turns notifications off', sent.length === 2 && recorded().some(x => x.text === '关掉提醒之后'))
+
+  writeFileSync(join(state, 'config.json'), JSON.stringify({
+    clientId: 'x', clientSecret: 'x', monitor: { notifyTo: ['888'] }, tenants: { enabled: true, root: tenantsRoot },
+  }))
+  // Not spawnSync: the stand-in broker lives in this process and has to keep answering.
+  const t = spawn(process.execPath, [join(ROOT, 'monitor.ts'), 'notify-test'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let tOut = ''
+  t.stdout!.on('data', d => { tOut += d }); t.stderr!.on('data', d => { tOut += d })
+  const status = await new Promise<number | null>(r => t.on('exit', r))
+  check('notify-test sends a sample to monitor.notifyTo', status === 0 && sent.at(-1)?.user === '888' && sent.at(-1)!.text.includes('测试'), tOut)
+  await stopBroker()
 } finally {
   rmSync(tmp, { recursive: true, force: true })
 }
